@@ -4,78 +4,88 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
-import android.os.Handler
-import android.os.Looper
-import java.util.ArrayDeque
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
-/** Runs tap batches sequentially, like the persistent adb shell input-tap queue in the PC tool. */
+/**
+ * Bấm vào màn hình. Mỗi lần bấm chạy lần lượt trong một hàng đợi và CHỜ cử chỉ trước hoàn tất
+ * rồi mới gửi cử chỉ sau (gửi dồn thì Android huỷ cử chỉ trước, chỉ cử chỉ cuối được thực hiện).
+ */
 class BotAccessibilityService : AccessibilityService() {
-    private data class Tap(val x: Int, val y: Int)
-    private val queue = ArrayDeque<Tap>()
-    private val mainHandler = Handler(Looper.getMainLooper())
-    @Volatile private var dispatching = false
+    private val exec: ExecutorService = Executors.newSingleThreadExecutor()
+    private val generation = AtomicInteger(0)
+    private val pending = AtomicInteger(0)
 
     override fun onServiceConnected() {
         instance = this
         isReady = true
-        BotEvents.setStatus(this, "● TRỢ NĂNG ĐÃ KẾT NỐI", "Dịch vụ Trợ năng đã sẵn sàng")
+        BotLog.i("Dịch vụ Trợ năng đã kết nối.")
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
-    override fun onInterrupt() = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
-    fun enqueueTaps(points: List<Pair<Int, Int>>) {
-        synchronized(queue) {
-            points.forEach { queue.addLast(Tap(it.first, it.second)) }
+    override fun onInterrupt() {}
+
+    /** Đưa một lần bấm vào hàng đợi (toạ độ theo pixel màn hình thật). */
+    fun enqueueTap(x: Int, y: Int) {
+        pending.incrementAndGet()
+        val gen = generation.get()
+        exec.execute { runTap(x, y, gen) }
+    }
+
+    private fun runTap(x: Int, y: Int, gen: Int) {
+        try {
+            if (gen == generation.get()) {
+                tapBlocking(x, y)
+            }
+        } catch (e: Exception) {
+            // bỏ qua lần bấm lỗi
+        } finally {
+            pending.decrementAndGet()
         }
-        mainHandler.post { dispatchNext() }
     }
 
-    fun pendingTapCount(): Int = synchronized(queue) { queue.size + if (dispatching) 1 else 0 }
+    /** Số lần bấm đang chờ trong hàng đợi. */
+    fun pendingTaps(): Int = pending.get()
 
-    /** Drops taps that have not started. The one currently being dispatched is at most 65 ms. */
-    fun abortPendingTaps() {
-        synchronized(queue) { queue.clear() }
+    /** Huỷ các lần bấm chưa thực hiện (dùng khi hết trận để không bấm lạc sang màn kết quả). */
+    fun abortQueued() {
+        generation.incrementAndGet()
     }
 
-    private fun dispatchNext() {
-        if (!isReady || dispatching) return
-        val next = synchronized(queue) { if (queue.isEmpty()) null else queue.removeFirst() } ?: return
-        val path = Path().apply { moveTo(next.x.toFloat(), next.y.toFloat()) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 65))
-            .build()
-        dispatching = true
-        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+    private fun tapBlocking(x: Int, y: Int) {
+        val path = Path()
+        path.moveTo(x.toFloat(), y.toFloat())
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 45L)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val latch = CountDownLatch(1)
+        val cb = object : AccessibilityService.GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
-                dispatching = false
-                dispatchNext()
+                latch.countDown()
             }
+
             override fun onCancelled(gestureDescription: GestureDescription?) {
-                dispatching = false
-                dispatchNext()
+                latch.countDown()
             }
-        }, mainHandler)
-        if (!accepted) {
-            dispatching = false
-            mainHandler.postDelayed({ dispatchNext() }, 100)
         }
+        val ok = dispatchGesture(gesture, cb, null)
+        if (!ok) return
+        latch.await(600, TimeUnit.MILLISECONDS)
+        Thread.sleep(15)
     }
 
     override fun onDestroy() {
-        synchronized(queue) { queue.clear() }
         if (instance === this) instance = null
         isReady = false
+        exec.shutdownNow()
         super.onDestroy()
     }
 
     companion object {
         @Volatile var instance: BotAccessibilityService? = null
         @Volatile var isReady: Boolean = false
-
-        fun tapScreen(x: Int, y: Int) { instance?.enqueueTaps(listOf(x to y)) }
-        fun tapSequence(points: List<Pair<Int, Int>>) { instance?.enqueueTaps(points) }
-        fun pendingCount(): Int = instance?.pendingTapCount() ?: 0
-        fun abortPending() { instance?.abortPendingTaps() }
     }
 }

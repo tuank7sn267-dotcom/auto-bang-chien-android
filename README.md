@@ -1,67 +1,53 @@
-# Auto Bang Chiến Android — 0.2.0 (native phone build)
+# Auto Bang Chiến — bản Android 0.2.0
 
-Bản này phát triển từ project Android 0.1.0 và lấy `auto_bang_chien.py` mới nhất trong gói PC làm nguồn đối chiếu cho logic.
+Bản Android chạy trực tiếp trên điện thoại, làm việc **giống bản máy tính mới nhất**:
+nhận diện màn hình bằng ảnh mẫu, bấm → chờ màn hình đổi, tự xử lý các tình huống như bản PC.
 
-## Mục tiêu
+## Khác với bản 0.1.0 (bản không tự chơi được)
+- Chụp màn hình đúng cách cho Android 14/15 (đăng ký callback bắt buộc) và luôn chụp theo khung ngang.
+- Bấm tuần tự, chờ từng cử chỉ xong (trước đây bấm dồn nên Android huỷ gần hết các lần bấm,
+  gồm cả lần chọn deck → lỗi "chọn deck rồi mà không bấm được").
+- Nhận diện nhanh (trước đây rất chậm, mỗi vòng hàng chục giây).
+- Chọn deck **chờ thấy dấu tích đỏ** rồi mới bấm Tấn công.
+- Banner "Đã bị đánh bại" / thanh đầy → quay lại, ghép bang hội mới (không quét ô nhầm).
+- Khi đánh: bấm **5 ô nhân vật**; hết trận **huỷ ngay các lần bấm còn xếp hàng**.
+- **Tự phục hồi khi bấm nhầm:** màn hình lạ có mũi tên quay lại → bấm quay lại; về màn hình chính → bấm
+  **Bang hội**; ở màn Bang hội → bấm **Trò chơi**; rồi tiếp tục Game chọn → Bang chiến.
+- Màn hình chính của app hiển thị nhật ký chạy và trạng thái Trợ năng.
 
-- Chạy trực tiếp trên điện thoại Android; sau khi cài không cần PC/ADB.
-- MediaProjection chụp màn hình theo phiên được người dùng cấp quyền.
-- AccessibilityService gửi thao tác chạm tuần tự.
-- OpenCV Android dùng `matchTemplate(TM_CCOEFF_NORMED)` để nhận diện 10 ảnh mẫu, thay cho bộ so khớp Kotlin thô của 0.1.0.
-- Giữ các quy tắc của bản Python: thứ tự nhận diện trạng thái, thanh tiến trình, lưới 30 ô, deck 1→2→3, chờ dấu tích đỏ, bấm 3 thẻ nhân vật theo 2 vòng, hủy các chạm đang xếp hàng khi rời trận, Lobby/Tiếp tục, bỏ qua nhà hết deck, lưu ảnh màn hình lạ và dừng sau 60 khung hình lạ.
+## Build bằng GitHub Actions (không cần cài Android Studio)
+1. Tạo tài khoản GitHub (miễn phí) và một kho mã mới (**New repository**; nên chọn **Private**).
+2. Giải nén file zip này. Trong kho vừa tạo bấm **Add file → Upload files**, kéo thả **toàn bộ nội dung**
+   thư mục đã giải nén (nhớ có thư mục `.github`), bấm **Commit changes** (nhánh `main`).
+   - Hoặc dùng dòng lệnh: `git init`, `git add .`, `git commit -m "init"`, `git branch -M main`,
+     `git remote add origin <địa-chỉ-kho>`, `git push -u origin main`.
+3. Vào tab **Actions**, thấy lần chạy "Build APK" (khoảng 5–10 phút). Dấu ✓ xanh là xong.
+4. Tải APK: vào tab **Releases** (hoặc mục "Releases" bên phải trang kho) → bản **latest** →
+   tải `app-debug.apk` ngay trên điện thoại. Cũng có thể tải ở mục **Artifacts** của lần chạy.
+5. Mỗi lần sửa code và đẩy lên GitHub, APK mới tự được build lại. APK mới **cài đè** được bản cũ
+   (đã dùng khoá ký cố định). **Lần đầu** nếu đang có bản 0.1.0 thì phải **gỡ bản cũ** trước.
+6. Nếu lần build báo lỗi đỏ ❌: bấm vào lần chạy, copy dòng lỗi (mục "Build debug APK") gửi lại để sửa.
 
-## Khác biệt bắt buộc so với bản PC
+## Cài và chạy trên điện thoại
+1. Mở file APK, cho phép cài từ nguồn này.
+2. **Bật Trợ năng:** Cài đặt → Trợ năng → Auto Bang Chiến → bật.
+   Nếu nút bị **mờ** (Android 13+ với app cài ngoài CH Play): mở app, bấm **MỞ CÀI ĐẶT ỨNG DỤNG**,
+   chọn dấu **ba chấm** → **Cho phép cài đặt bị hạn chế**, rồi bật Trợ năng lại.
+3. Mở app, bấm **BẮT ĐẦU**. Khi hộp thoại chia sẻ màn hình hiện ra, chọn **Toàn bộ màn hình**
+   (không chọn "một ứng dụng", nếu không app chỉ thấy chính nó).
+4. Chuyển sang game, **xoay ngang**, vào màn Bang chiến. Quay lại app để xem **Nhật ký**.
+5. Muốn dừng: bấm **DỪNG** trong app (hoặc kéo thanh thông báo của app).
 
-Bản PC dùng một phiên `adb shell` giữ mở để gửi `input tap` và tự benchmark 3 kiểu `screencap` (raw/gzip/PNG). APK chạy ngay trên chính điện thoại không thể gọi ADB của máy tính hoặc giữ phiên ADB host như bản PC. Bản Android thay phần vận chuyển đó bằng:
+## Lưu ý
+- Giữ game ở **nền trước** và không tắt màn hình. Nên tắt tối ưu pin cho Auto Bang Chiến.
+- Mỗi lần bấm BẮT ĐẦU phải cấp lại quyền chia sẻ màn hình (Android yêu cầu).
+- Gặp màn hình lạ (popup, mất mạng...) quá 60 lần liên tiếp, hoặc bấm quay lại 25 lần vẫn kẹt:
+  bot tự dừng và lưu ảnh vào `Android/data/vn.autobangchien/files/debug/` để bạn gửi lại.
+- Game có thể cấm công cụ tự động, tài khoản có nguy cơ bị phạt. Hãy cân nhắc trước khi dùng.
+- Khoá ký trong repo (`app/debug.keystore`) là khoá debug công khai, chỉ dùng cho bản cài cá nhân.
+  Để kho ở chế độ Private.
 
-- MediaProjection + ImageReader để lấy frame trên thiết bị.
-- AccessibilityService với hàng đợi chạm tuần tự; có thể xóa các chạm chưa bắt đầu khi trận kết thúc.
-- OpenCV native trên Android để nhận diện ảnh mẫu.
-
-Vì vậy logic chơi được port, nhưng tốc độ chụp/bấm không thể giống hệt transport ADB trên PC. Cần đo trên thiết bị thật.
-
-## Build APK bằng GitHub Actions (không cần cài Android Studio)
-
-1. Tạo một repository GitHub mới, ví dụ `auto-bang-chien-android`.
-2. Upload toàn bộ nội dung thư mục dự án này lên repository (bao gồm thư mục ẩn `.github/workflows/`). Có thể dùng GitHub web: **Add file → Upload files**.
-3. Chọn **Commit changes**.
-4. Mở tab **Actions** của repository. Workflow **Build Android APK** sẽ tự chạy sau khi push.
-5. Khi workflow có dấu xanh, mở lần chạy mới nhất → phần **Artifacts** → tải `auto-bang-chien-debug-apk`.
-6. Giải nén ZIP artifact; bên trong có `app-debug.apk`. Chép APK sang điện thoại và cài đặt.
-
-Workflow dùng JDK 17, Gradle 8.9, Android Gradle Plugin 8.7.3, compile SDK 35 và OpenCV Android AAR 4.14.0 từ Maven Central.
-
-## Nếu muốn build cục bộ
-
-Cần JDK 17, Android SDK Platform 35 và Gradle 8.9. Từ thư mục gốc dự án chạy:
-
-```bash
-gradle --no-daemon assembleDebug
-```
-
-APK nằm tại `app/build/outputs/apk/debug/app-debug.apk`.
-
-## Cấp quyền và chạy lần đầu
-
-1. Cài APK, mở Auto Bang Chiến. Nếu đang cài đè bản 0.1.0 được build trên PC hoặc APK từ một lần GitHub Actions trước, có thể cần gỡ bản cũ trước do chữ ký debug khác nhau.
-2. Vào **CẤP QUYỀN TRỢ NĂNG**, bật dịch vụ Auto Bang Chiến trong Cài đặt Trợ năng. Với Android 13+ nếu hệ thống chặn ứng dụng cài ngoài CH Play, vào thông tin ứng dụng → menu ⋮ → **Cho phép cài đặt bị hạn chế** (tên mục có thể khác theo hãng máy), rồi bật lại Trợ năng.
-3. Bật tự xoay màn hình và xoay điện thoại sang ngang trước khi nhấn Bắt đầu (dịch vụ tạo phiên chụp theo kích thước màn hình tại thời điểm cấp quyền).
-4. Nên bật **Chạy thử (chỉ nhận diện, KHÔNG chạm)** trước. Mở game Bang chiến, xác nhận game đang ngang, sau đó chuyển về ứng dụng Auto Bang Chiến.
-5. Nhấn **BẮT ĐẦU**, chấp nhận hộp thoại chia sẻ màn hình; sau khi app báo đang chạy, chuyển lại game. Chọn toàn bộ màn hình nếu Android hiển thị lựa chọn phạm vi.
-6. Kiểm tra Nhật ký có các trạng thái `LOBBY_SELECT`, `MAIN`, `GRID`, `DIALOG`, `BATTLE`, `RESULT` đúng với màn hình game.
-7. Chỉ tắt Chạy thử khi đã xác nhận nhận diện ổn định. Nên đặt giới hạn trận nhỏ (ví dụ 1–2) ở lần chạy thao tác đầu tiên.
-
-## Debug
-
-- Ảnh màn hình lạ được lưu trong thư mục riêng của app: `Android/data/vn.autobangchien/files/debug/` (một số Android hạn chế duyệt thư mục này; có thể dùng trình quản lý tệp được cấp quyền).
-- Nhật ký hiển thị trạng thái, điểm khớp mẫu tốt nhất và thao tác chính.
-- Nếu không nhận diện được, ảnh mẫu phải được chụp lại từ cùng giao diện/độ phân giải/tỉ lệ game; không tự ý hạ ngưỡng 0.75 vì có thể gây bấm nhầm.
-- Nếu thiết bị đổi tỉ lệ màn hình, vùng tọa độ có thể cần hiệu chỉnh. Hiện code chuẩn hóa về 2400×1080, nhưng điều này không bảo đảm mọi tỉ lệ/cutout đều đúng.
-
-## Giới hạn và an toàn
-
-- Đây là bản 0.2.0 cần kiểm thử thực tế; chưa có bằng chứng chạy ổn định trên điện thoại của bạn. Build xanh chỉ xác nhận biên dịch, không xác nhận bot chơi đúng.
-- Android yêu cầu người dùng cấp quyền chụp màn hình lại mỗi phiên. Không cam kết hoạt động khi màn hình tắt, game bị đưa xuống nền hoặc hệ thống thu hồi quyền.
-- Giữ game ở foreground, màn hình ngang và tránh bật tiết kiệm pin cho app trong lúc thử.
-- Chạy thử ở tài khoản phụ/môi trường thử nghiệm, đặt giới hạn trận thấp. Tự động hóa có thể vi phạm điều khoản trò chơi hoặc khiến tài khoản bị hạn chế.
-- `auto_bang_chien.py` trong thư mục gốc chỉ là bản PC mới nhất để đối chiếu; APK không chạy Python và không cần ADB.
+## Cấu trúc mã
+`Cfg.kt` (toạ độ, ảnh mẫu) · `Frame.kt` (khung hình) · `Vision.kt` (nhận diện) ·
+`BangChienEngine.kt` (kịch bản) · `BotAccessibilityService.kt` (bấm) ·
+`CaptureBotService.kt` + `FrameSource.kt` (chụp màn hình) · `MainActivity.kt` (giao diện).
