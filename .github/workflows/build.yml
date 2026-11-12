@@ -1,4 +1,4 @@
-name: Build Auto Bang Chien V3 APK
+name: Build APK
 
 on:
   push:
@@ -19,10 +19,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Cài Android SDK
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - uses: android-actions/setup-android@v3
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -34,14 +31,14 @@ jobs:
       - name: Lưu APK (tải ở mục Artifacts của lần chạy)
         uses: actions/upload-artifact@v4
         with:
-          name: auto-bang-chien-v3-apk
+          name: auto-bang-chien-apk
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Đăng APK lên mục Releases (bản mới nhất)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.0
-          name: Auto Bang Chiến V3 - bản thử nghiệm
-          body: Auto Bang Chiến V3. Bản thử nghiệm thích nghi tọa độ và tỷ lệ màn hình. Tải app-debug.apk để kiểm tra.
+          tag_name: latest
+          name: Auto Bang Chiến - bản mới nhất
+          body: Tải file app-debug.apk bên dưới rồi cài lên điện thoại.
           prerelease: true
           files: app/build/outputs/apk/debug/app-debug.apk
