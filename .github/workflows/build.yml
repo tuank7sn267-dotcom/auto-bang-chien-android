@@ -1,69 +1,47 @@
-
-name: Build Android V2 APK
+name: Build Auto Bang Chien V3 APK
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build Debug APK
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK packages
-        shell: bash
+      - name: Cài Android SDK
         run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-          fi
-
-          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
-            echo "Android SDK manager not found"
-            exit 1
-          fi
-
-          set +o pipefail
-          yes | "$SDKMANAGER" --licenses
-          set -o pipefail
-
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
 
-      - name: Build APK
-        run: gradle --no-daemon clean assembleDebug --stacktrace
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Lưu APK (tải ở mục Artifacts của lần chạy)
         uses: actions/upload-artifact@v4
         with:
-          name: auto-bang-chien-v2-apk
+          name: auto-bang-chien-v3-apk
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 14
+
+      - name: Đăng APK lên mục Releases (bản mới nhất)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v3.0.0
+          name: Auto Bang Chiến V3 - bản thử nghiệm
+          body: Auto Bang Chiến V3. Bản thử nghiệm thích nghi tọa độ và tỷ lệ màn hình. Tải app-debug.apk để kiểm tra.
+          prerelease: true
+          files: app/build/outputs/apk/debug/app-debug.apk
