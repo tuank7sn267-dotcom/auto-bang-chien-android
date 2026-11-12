@@ -11,8 +11,8 @@ android {
         applicationId = "vn.autobangchien"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     // Khoá ký cố định để cài đè được bản mới lên bản cũ (không phải gỡ app mỗi lần).
@@ -41,6 +41,8 @@ android {
         jvmTarget = "17"
     }
 }
+
+
 dependencies {
     implementation("org.opencv:opencv:4.14.0")
 }

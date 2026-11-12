@@ -56,14 +56,30 @@ class BangChienEngine(
     }
 
     // ------------------------------------------------------------------ bấm
-    private fun tap(p: Pt) {
+    private fun tap(p: Pt, frame: Frame? = null, anchor: String? = null, template: String? = null) {
         val s = BotAccessibilityService.instance
         if (s == null) {
             BotLog.e("Dịch vụ Trợ năng chưa kết nối nên không bấm được. Hãy bật lại Trợ năng.")
             sleep(1000)
             return
         }
-        s.enqueueTap(p.x * source.w / Cfg.REF_W, p.y * source.h / Cfg.REF_H)
+        // Nếu có ảnh mẫu, ưu tiên bấm đúng tâm nút vừa tìm thấy trên ảnh hiện tại.
+        // Nếu không, hiệu chỉnh điểm theo anchor của màn hình để bù dịch chuyển/co giãn UI.
+        val logical = if (frame != null && template != null) {
+            val found = vision.locate(frame, template)?.takeIf { it.score >= Cfg.MATCH_THRESHOLD }
+            if (found != null) {
+                BotLog.i("Tìm thấy nút $template: (${found.center.x},${found.center.y}), độ khớp=${String.format(Locale.US, "%.2f", found.score)}, tỷ lệ=${found.scaleX}x${found.scaleY}")
+            } else {
+                BotLog.i("Không tìm thấy ảnh mẫu $template đủ tin cậy; dùng tọa độ dự phòng.")
+                saveDebug(frame, "tapmiss_" + template)
+            }
+            found?.center ?: if (anchor != null) vision.adjustPoint(frame, anchor, p) else p
+        } else if (frame != null && anchor != null) {
+            vision.adjustPoint(frame, anchor, p)
+        } else p
+        // Dùng chính Frame đã nhận diện nút để tránh lệch nếu kích thước capture vừa thay đổi.
+        val screen = frame?.toScreen(logical) ?: source.toScreen(logical)
+        s.enqueueTap(screen.x, screen.y)
     }
 
     private fun pendingTaps(): Int {
@@ -77,8 +93,14 @@ class BangChienEngine(
     }
 
     /** Bấm rồi chờ đến khi màn hình mới hiện ra; khung hình nhận ra được thì dùng luôn cho vòng sau. */
-    private fun tapWait(p: Pt, frame: Frame, timeoutMs: Long) {
-        tap(p)
+    private fun tapWait(
+        p: Pt,
+        frame: Frame,
+        timeoutMs: Long,
+        anchor: String? = null,
+        template: String? = null
+    ) {
+        tap(p, frame, anchor, template)
         val t0 = now()
         var changed = false
         while (!stopFlag && now() - t0 < timeoutMs) {
@@ -106,8 +128,14 @@ class BangChienEngine(
             FileOutputStream(f).use { out ->
                 frame.toBitmap().compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
             }
+            File(dir, tag + "_" + stamp + ".txt").writeText(
+                "capture=${frame.w}x${frame.h}\n" +
+                    "content=${frame.contentLeft},${frame.contentTop},${frame.contentRight},${frame.contentBottom}\n" +
+                    "reference=${Cfg.REF_W}x${Cfg.REF_H}\n" +
+                    "hint=Ảnh gốc; vùng content là vùng sau khi bỏ viền đen tự phát hiện.\n"
+            )
             savedDebug++
-            BotLog.i("Đã lưu ảnh để kiểm tra: " + f.absolutePath)
+            BotLog.i("Đã lưu ảnh và thông tin tọa độ để kiểm tra: " + f.absolutePath)
         } catch (e: Exception) {
             // không lưu được thì thôi
         }
@@ -117,13 +145,22 @@ class BangChienEngine(
     fun run() {
         BotLog.i("Bot bắt đầu.")
         var waited = 0
-        while (!stopFlag && source.grab() == null) {
-            sleep(100)
-            waited++
-            if (waited > 80) {
-                BotLog.e("Không nhận được hình ảnh màn hình. Hãy chọn 'Toàn bộ màn hình' khi chia sẻ.")
-                return
+        var firstFrame: Frame? = null
+        while (!stopFlag && firstFrame == null) {
+            firstFrame = source.grab()
+            if (firstFrame == null) {
+                sleep(100)
+                waited++
+                if (waited > 80) {
+                    BotLog.e("Không nhận được hình ảnh màn hình. Hãy chọn 'Toàn bộ màn hình' khi chia sẻ.")
+                    return
+                }
             }
+        }
+        if (firstFrame != null) {
+            BotLog.i("Màn hình chụp: ${firstFrame.w}x${firstFrame.h}; vùng game: " +
+                "${firstFrame.contentLeft},${firstFrame.contentTop} - ${firstFrame.contentRight},${firstFrame.contentBottom}")
+            cache = firstFrame
         }
         while (!stopFlag) {
             if (maxBattles > 0 && battles >= maxBattles) {
@@ -173,11 +210,11 @@ class BangChienEngine(
                 Cfg.ST_RESULT -> onResult(cur)
                 Cfg.ST_TOWN -> {
                     BotLog.i("Đang ở màn hình chính -> bấm Bang hội")
-                    tapWait(Cfg.TAP_TOWN_GUILD, cur, 4000)
+                    tapWait(Cfg.TAP_TOWN_GUILD, cur, 4000, anchor = "town_banghoi")
                 }
                 Cfg.ST_GUILD_HOME -> {
                     BotLog.i("Đang ở màn Bang hội -> bấm Trò chơi")
-                    tapWait(Cfg.TAP_GUILD_PLAY, cur, 4000)
+                    tapWait(Cfg.TAP_GUILD_PLAY, cur, 4000, anchor = "guild_play")
                 }
                 Cfg.ST_BACKABLE -> onBackable(cur)
                 else -> onUnknown(cur)
@@ -191,7 +228,7 @@ class BangChienEngine(
 
     // ------------------------------------------------------------------ xử lý từng màn hình
     private fun onMain(frame: Frame) {
-        val ratio = vision.barRatio(frame, Cfg.MAIN_BAR)
+        val ratio = vision.barRatio(frame, Cfg.MAIN_BAR, "main_attack")
         val full = ratio >= Cfg.BAR_FULL_RATIO
         if (same == 0) {
             BotLog.i("Tiến trình bang đối thủ: " + (ratio * 100).toInt() + "%" + (if (full) " (ĐẦY)" else ""))
@@ -203,12 +240,12 @@ class BangChienEngine(
                 return
             }
             BotLog.i("Bang đã clear hết -> tìm Bang hội mới")
-            tap(Cfg.TAP_MAIN_NEWGUILD)
+            tap(Cfg.TAP_MAIN_NEWGUILD, frame, anchor = "main_attack")
             val t0 = now()
             while (!stopFlag && now() - t0 < 4000) {
                 sleep(150)
                 val g = source.grab()
-                if (g != null && vision.barRatio(g, Cfg.MAIN_BAR) < Cfg.BAR_FULL_RATIO) break
+                if (g != null && vision.barRatio(g, Cfg.MAIN_BAR, "main_attack") < Cfg.BAR_FULL_RATIO) break
             }
             sleep(200)
             lastNewGuild = now()
@@ -218,12 +255,12 @@ class BangChienEngine(
             totalHouses = 0
         } else {
             // Chưa đầy -> bấm "Tấn công" vào lưới 30 ô
-            tapWait(Cfg.TAP_MAIN_ATTACK, frame, 3000)
+            tapWait(Cfg.TAP_MAIN_ATTACK, frame, 3000, template = "main_attack")
         }
     }
 
     private fun gridDone(f: Frame): Boolean {
-        return vision.barRatio(f, Cfg.GRID_BAR) >= Cfg.BAR_FULL_RATIO ||
+        return vision.barRatio(f, Cfg.GRID_BAR, "grid_label") >= Cfg.BAR_FULL_RATIO ||
             vision.score(f, "grid_defeated") >= Cfg.MATCH_THRESHOLD
     }
 
@@ -239,7 +276,7 @@ class BangChienEngine(
         // Phải kiểm tra TRƯỚC khi quét ô: banner trắng đè lên lưới làm ô trống trông như ô đánh được.
         if (gridDone(frame)) {
             BotLog.i("Bang đối thủ đã bị đánh bại -> quay lại để ghép bang hội mới")
-            tapWait(Cfg.TAP_BACK, frame, 3000)
+            tapWait(Cfg.TAP_BACK, frame, 3000, template = "back_arrow")
             return
         }
         var f = frame
@@ -265,10 +302,10 @@ class BangChienEngine(
             BotLog.i("Bang có " + total + " nhà, chọn ô " + t)
             dialogTries = 0
             pending = t
-            tapWait(Cfg.cellCenter(t), f, 3000)
+            tapWait(vision.cellCenter(f, t), f, 3000)
         } else {
             BotLog.i("Không còn ô nào đánh được (" + total + " nhà) -> quay lại kiểm tra tiến trình")
-            tapWait(Cfg.TAP_BACK, f, 3000)
+            tapWait(Cfg.TAP_BACK, f, 3000, template = "back_arrow")
             sleep(Cfg.IDLE_WAIT_MS)
         }
     }
@@ -284,7 +321,7 @@ class BangChienEngine(
         if (!any || dialogTries > 10) {
             BotLog.i("Hết deck hoặc không bấm được -> đóng bảng, bỏ qua ô " + pending)
             if (pending > 0) blocked.add(pending)
-            tapWait(Cfg.TAP_DIALOG_CLOSE, frame, 2000)
+            tapWait(Cfg.TAP_DIALOG_CLOSE, frame, 2000, template = "dialog_close")
             return
         }
         var want = 0
@@ -300,7 +337,7 @@ class BangChienEngine(
         // Nếu vài lần liên tiếp không thấy dấu tích thì vẫn bấm Tấn công (phòng nhận diện dấu tích sai).
         if (sel != want && dialogTries < 3) {
             BotLog.i("Chọn Deck " + (want + 1))
-            tap(Pt(Cfg.DECK_RADIO_X, Cfg.DECK_ROW_Y[want]))
+            tap(Pt(Cfg.DECK_RADIO_X, Cfg.DECK_ROW_Y[want]), frame, anchor = "dialog_close")
             val t0 = now()
             var ok = false
             while (!stopFlag && now() - t0 < 1500) {
@@ -317,7 +354,7 @@ class BangChienEngine(
             if (!ok) return
         }
         BotLog.i("Deck " + (want + 1) + " đã chọn -> bấm Tấn công")
-        tapWait(Cfg.TAP_DIALOG_ATTACK, f, 5000)
+        tapWait(Cfg.TAP_DIALOG_ATTACK, f, 5000, template = "dialog_attack")
     }
 
     private fun onBattle() {
@@ -328,7 +365,8 @@ class BangChienEngine(
         }
         // Giữ hàng đợi bấm luôn có việc; vòng sau chụp màn hình chạy song song với việc bấm
         if (pendingTaps() <= 4) {
-            for (c in Cfg.BATTLE_CARDS) tap(c)
+            val battleFrame = source.grab()
+            for (c in Cfg.BATTLE_CARDS) tap(c, battleFrame, anchor = "battle_pause")
         }
     }
 
@@ -336,10 +374,10 @@ class BangChienEngine(
         // Bang chỉ có 1 nhà (0/1) -> ưu tiên Lobby, còn lại bấm Tiếp tục
         if (totalHouses == 1) {
             BotLog.i("Bang 0/1 nhà -> bấm Lobby")
-            tapWait(Cfg.TAP_RESULT_LOBBY, frame, 4000)
+            tapWait(Cfg.TAP_RESULT_LOBBY, frame, 4000, anchor = "result_mainmenu")
         } else {
             BotLog.i("Bấm Tiếp tục")
-            tapWait(Cfg.TAP_RESULT_CONTINUE, frame, 4000)
+            tapWait(Cfg.TAP_RESULT_CONTINUE, frame, 4000, anchor = "result_mainmenu")
         }
     }
 
@@ -358,7 +396,7 @@ class BangChienEngine(
         }
         if (backCount == 2) saveDebug(frame, "backable")
         BotLog.i("Màn hình lạ có nút quay lại -> bấm quay lại")
-        tapWait(Cfg.TAP_BACK, frame, 3000)
+        tapWait(Cfg.TAP_BACK, frame, 3000, template = "back_arrow")
     }
 
     private fun onUnknown(frame: Frame) {

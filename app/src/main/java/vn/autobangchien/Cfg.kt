@@ -1,6 +1,6 @@
 package vn.autobangchien
 
-/** Điểm bấm theo toạ độ chuẩn 2400x1080 (ngang). */
+/** Điểm bấm theo canvas logic 2400x1080; Frame tự ánh xạ sang vùng game thực tế. */
 class Pt(val x: Int, val y: Int)
 
 /** Toàn bộ cấu hình, giống bản máy tính (auto_bang_chien.py). */
