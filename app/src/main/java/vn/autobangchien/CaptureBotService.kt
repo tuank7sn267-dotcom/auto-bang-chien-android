@@ -32,6 +32,15 @@ class CaptureBotService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent != null && intent.action == "SNAP") {
+            val e = engine
+            if (e != null) {
+                e.requestSnapshot(6000L)
+            } else {
+                BotLog.e("Hãy bấm BẮT ĐẦU trước, rồi mới chụp ảnh game.")
+            }
+            return START_NOT_STICKY
+        }
         if (intent == null || intent.action == "STOP") {
             stopSelf()
             return START_NOT_STICKY

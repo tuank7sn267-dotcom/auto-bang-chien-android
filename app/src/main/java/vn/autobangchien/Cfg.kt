@@ -1,6 +1,6 @@
 package vn.autobangchien
 
-/** Điểm bấm theo canvas logic 2400x1080; Frame tự ánh xạ sang vùng game thực tế. */
+/** Điểm bấm theo toạ độ chuẩn 2400x1080 (ngang). */
 class Pt(val x: Int, val y: Int)
 
 /** Toàn bộ cấu hình, giống bản máy tính (auto_bang_chien.py). */
@@ -31,6 +31,20 @@ object Cfg {
     const val IDLE_WAIT_MS = 3000L
     const val UNKNOWN_LIMIT = 60
 
+    /** Dò bố cục: biên dọc cho tìm theo dải ngang, tâm màn hình chuẩn, các mức tỉ lệ thử khi lạ. */
+    const val BAND_MARGIN_Y = 60
+    /** Ngưỡng riêng khi chỉ cần biết VỊ TRÍ của điểm neo (đã biết đang ở màn hình nào). */
+    const val ANCHOR_THRESHOLD = 0.60
+    const val REF_CENTER_X = 1253.5
+    val SCALE_MULS = doubleArrayOf(1.0, 0.9, 1.1, 0.8, 1.25, 0.7, 1.4)
+
+    /** Dò 5 ô nhân vật bằng viên ngọc dưới mỗi ô (cách nhau ~279px). */
+    const val GEM_THRESHOLD = 0.70
+    const val GEM_SPACING = 279
+    const val GEM_SPACING_TOL = 30
+    const val CARD_DX = 56
+    const val CARD_DY = -40
+
     /** Hai nút "Tấn công" giống hệt nhau nhưng lệch ~70px nên vùng tìm phải hẹp. */
     val MARGIN_OVERRIDE: Map<String, Int> = mapOf(
         "main_attack" to 25, "dialog_attack" to 25, "grid_defeated" to 40, "back_arrow" to 20,
@@ -51,7 +65,9 @@ object Cfg {
         "back_arrow" to intArrayOf(138, 24, 227, 99),
         "town_lapnhom" to intArrayOf(172, 1005, 342, 1052),
         "town_banghoi" to intArrayOf(1165, 1005, 1320, 1052),
-        "guild_play" to intArrayOf(1225, 950, 1445, 1012)
+        "guild_play" to intArrayOf(1225, 950, 1445, 1012),
+        "lobby_card" to intArrayOf(745, 815, 1030, 878),
+        "card_gem" to intArrayOf(966, 1018, 998, 1050)
     )
 
     val TAP_BANG_CHIEN_CARD = Pt(888, 581)

@@ -69,7 +69,7 @@ class MainActivity : Activity() {
         root.setPadding(dp(14), dp(16), dp(14), dp(12))
         root.setBackgroundColor(Color.rgb(16, 24, 32))
 
-        root.addView(label("AUTO BANG CHIẾN V3", 24f, 0xFF55D6A0.toInt()))
+        root.addView(label("AUTO BANG CHIẾN", 24f, 0xFF55D6A0.toInt()))
         status = label(BotLog.status, 18f, 0xFFFFC857.toInt())
         root.addView(status)
         stats = label("", 14f, 0xFFB8C4CE.toInt())
@@ -85,6 +85,11 @@ class MainActivity : Activity() {
 
         root.addView(makeButton("▶  BẮT ĐẦU") { startBot() }, wrap())
         root.addView(makeButton("■  DỪNG") { stopBot() }, wrap())
+        root.addView(makeButton("CHỤP ẢNH GAME (sau 6 giây) - để gửi hỗ trợ") {
+            val i = Intent(this, CaptureBotService::class.java)
+            i.action = "SNAP"
+            startService(i)
+        }, wrap())
         root.addView(makeButton("CẤP QUYỀN TRỢ NĂNG") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }, wrap())
@@ -97,8 +102,7 @@ class MainActivity : Activity() {
         root.addView(label("NHẬT KÝ", 13f, 0xFF55D6A0.toInt()))
         scroll = ScrollView(this)
         logView = label(
-            "V3 thử tự thích nghi tọa độ với nhiều tỷ lệ màn hình.\n" +
-                "1. Bật Trợ năng cho Auto Bang Chiến (nếu nút bị mờ: bấm nút 'Mở cài đặt ứng dụng', " +
+            "1. Bật Trợ năng cho Auto Bang Chiến (nếu nút bị mờ: bấm nút 'Mở cài đặt ứng dụng', " +
                 "chọn dấu ba chấm > Cho phép cài đặt bị hạn chế).\n" +
                 "2. Bấm BẮT ĐẦU và chọn chia sẻ 'Toàn bộ màn hình'.\n" +
                 "3. Mở game, xoay ngang, vào màn Bang chiến.",

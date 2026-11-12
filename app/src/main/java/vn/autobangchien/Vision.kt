@@ -2,29 +2,49 @@ package vn.autobangchien
 
 import android.content.res.AssetManager
 import android.graphics.BitmapFactory
-import org.opencv.android.OpenCVLoader
-import org.opencv.core.Core
-import org.opencv.core.CvType
-import org.opencv.core.Mat
-import org.opencv.core.Size
-import org.opencv.imgproc.Imgproc
+import kotlin.math.abs
 import kotlin.math.sqrt
 
-class Template(
-    val rect: IntArray,
-    val w: Int,
-    val h: Int,
-    val gray: IntArray,
-    val mean: Double,
+/** Ảnh mẫu dạng xám cùng thống kê dùng cho tương quan chuẩn hoá. */
+class Tpl(val w: Int, val h: Int, val d: IntArray) {
+    val n: Double = (w * h).toDouble()
+    val mean: Double
     val norm: Double
-)
 
-data class TemplateMatch(val center: Pt, val scaleX: Double, val scaleY: Double, val score: Double)
+    init {
+        var s = 0.0
+        for (v in d) s += v
+        mean = s / n
+        var q = 0.0
+        for (v in d) {
+            val e = v - mean
+            q += e * e
+        }
+        norm = q
+    }
+}
+
+class Template(val rect: IntArray, val half: Tpl, val quarter: Tpl)
+
+/** Kết quả dò: điểm giống và độ lệch (dx, dy) so với vị trí chuẩn, tính theo toạ độ chuẩn. */
+class Loc(val score: Double, val dx: Int, val dy: Int)
 
 /**
- * Nhận diện màn hình bằng so khớp ảnh mẫu (tương quan chuẩn hoá, giống cv2.TM_CCOEFF_NORMED)
- * trên ảnh xám thu nhỏ một nửa: thử vùng dự kiến trước, sau đó dùng OpenCV tìm toàn vùng
- * với nhiều tỷ lệ X/Y nếu giao diện đã dịch chuyển hoặc thay đổi kích thước.
+ * Bố cục đã học của thiết bị này: mỗi ảnh mẫu đã tìm thấy lệch bao nhiêu so với máy chuẩn,
+ * và tỉ lệ giao diện đã được xác nhận hay chưa.
+ */
+class Layout {
+    val mem = HashMap<String, IntArray>()
+    @Volatile var mul: Double = 1.0
+    @Volatile var validated: Boolean = false
+}
+
+/**
+ * Nhận diện màn hình bằng so khớp ảnh mẫu (tương quan chuẩn hoá, giống cv2.TM_CCOEFF_NORMED).
+ *
+ * Để chạy được trên mọi màn hình: tìm quanh vị trí đã nhớ trước (rất nhanh); nếu không thấy thì
+ * dò theo DẢI NGANG trên toàn bề ngang (giao diện neo trái/giữa/phải nên chỉ lệch theo chiều ngang),
+ * rồi nhớ lại vị trí thật. Mọi điểm bấm và vùng đo màu đều dịch theo vị trí thật đó.
  */
 class Vision(assets: AssetManager) {
     companion object {
@@ -33,24 +53,28 @@ class Vision(assets: AssetManager) {
         const val LIGHT = 2
     }
 
+    @Volatile var layout = Layout()
     private val tpl = HashMap<String, Template>()
-    private val templateMats = HashMap<String, Mat>()
-    private var openCvReady = false
-    private var cachedFrame: Frame? = null
-    private var cachedFrameMat: Mat? = null
-    private val matchCache = HashMap<String, TemplateMatch?>()
+
+    private class Hit(val score: Double, val x: Int, val y: Int)
 
     init {
-        try {
-            openCvReady = OpenCVLoader.initLocal()
-            if (openCvReady) BotLog.i("OpenCV đã sẵn sàng: tìm ảnh mẫu đa tỷ lệ.")
-            else BotLog.e("OpenCV không khởi tạo được; dùng bộ nhận diện dự phòng.")
-        } catch (e: Exception) {
-            BotLog.e("Không khởi tạo được OpenCV: " + e.message)
-        }
         for ((name, rect) in Cfg.TEMPLATES) {
             tpl[name] = load(assets, name, rect)
         }
+    }
+
+    private fun shrink(t: Tpl): Tpl {
+        val w = t.w / 2
+        val h = t.h / 2
+        val out = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = (2 * y) * t.w + 2 * x
+                out[y * w + x] = (t.d[i] + t.d[i + 1] + t.d[i + t.w] + t.d[i + t.w + 1]) / 4
+            }
+        }
+        return Tpl(w, h, out)
     }
 
     private fun load(assets: AssetManager, name: String, rect: IntArray): Template {
@@ -63,124 +87,51 @@ class Vision(assets: AssetManager) {
         val tw = bw / 2
         val th = bh / 2
         val g = IntArray(tw * th)
-        var sum = 0.0
         for (y in 0 until th) {
             for (x in 0 until tw) {
-                val v = (Frame.gray(pix[(2 * y) * bw + 2 * x]) + Frame.gray(pix[(2 * y) * bw + 2 * x + 1]) +
+                g[y * tw + x] = (Frame.gray(pix[(2 * y) * bw + 2 * x]) + Frame.gray(pix[(2 * y) * bw + 2 * x + 1]) +
                     Frame.gray(pix[(2 * y + 1) * bw + 2 * x]) + Frame.gray(pix[(2 * y + 1) * bw + 2 * x + 1])) / 4
-                g[y * tw + x] = v
-                sum += v
             }
         }
-        val mean = sum / (tw * th)
-        var norm = 0.0
-        for (v in g) {
-            val d = v - mean
-            norm += d * d
-        }
-        return Template(rect, tw, th, g, mean, norm)
+        val half = Tpl(tw, th, blur3(g, tw, th))
+        return Template(rect, half, shrink(half))
     }
 
-    private fun matForFrame(f: Frame): Mat {
-        if (cachedFrame === f && cachedFrameMat != null) return cachedFrameMat!!
-        cachedFrameMat?.release()
-        cachedFrame = f
-        matchCache.clear()
-        val bytes = ByteArray(Frame.HW * Frame.HH)
-        val pixels = f.half
-        for (i in pixels.indices) bytes[i] = pixels[i].toByte()
-        val mat = Mat(Frame.HH, Frame.HW, CvType.CV_8UC1)
-        mat.put(0, 0, bytes)
-        cachedFrameMat = mat
-        return mat
-    }
-
-    private fun templateMat(name: String, t: Template): Mat {
-        return templateMats.getOrPut(name) {
-            val bytes = ByteArray(t.gray.size)
-            for (i in t.gray.indices) bytes[i] = t.gray[i].toByte()
-            Mat(t.h, t.w, CvType.CV_8UC1).also { it.put(0, 0, bytes) }
-        }
-    }
-
-    /** Tìm ảnh mẫu trên toàn vùng game, có thử nhiều tỷ lệ để thích nghi UI co giãn. */
-    fun locate(f: Frame, name: String): TemplateMatch? {
-        if (!openCvReady) return null
-        if (cachedFrame !== f) {
-            matForFrame(f)
-        }
-        if (matchCache.containsKey(name)) return matchCache[name]
-        val t = tpl[name] ?: return null
-        val src = cachedFrameMat ?: return null
-        val base = templateMat(name, t)
-        var bestScore = -2.0
-        var bestX = 0
-        var bestY = 0
-        var bestScaleX = 1.0
-        var bestScaleY = 1.0
-        // Thử cả co giãn không đồng nhất: nhiều game thay đổi bố cục theo chiều rộng/cao riêng biệt.
-        val scales = arrayOf(
-            0.85 to 1.0, 0.90 to 1.0, 1.0 to 1.0, 1.10 to 1.0, 1.15 to 1.0, 1.25 to 1.0,
-            1.0 to 0.90, 1.0 to 1.10, 0.90 to 0.90, 1.10 to 1.10, 1.25 to 1.10, 1.10 to 0.90
-        )
-        for ((scaleX, scaleY) in scales) {
-            val tw = (t.w * scaleX).toInt().coerceAtLeast(8)
-            val th = (t.h * scaleY).toInt().coerceAtLeast(8)
-            if (tw >= Frame.HW || th >= Frame.HH) continue
-            val scaled = Mat()
-            val result = Mat()
-            try {
-                Imgproc.resize(base, scaled, Size(tw.toDouble(), th.toDouble()), 0.0, 0.0,
-                    if (scaleX < 1.0 || scaleY < 1.0) Imgproc.INTER_AREA else Imgproc.INTER_LINEAR)
-                Imgproc.matchTemplate(src, scaled, result, Imgproc.TM_CCOEFF_NORMED)
-                val mm = Core.minMaxLoc(result)
-                if (mm.maxVal > bestScore) {
-                    bestScore = mm.maxVal
-                    bestX = mm.maxLoc.x.toInt()
-                    bestY = mm.maxLoc.y.toInt()
-                    bestScaleX = scaleX
-                    bestScaleY = scaleY
-                }
-            } finally {
-                scaled.release()
-                result.release()
+    // ------------------------------------------------------------------ so khớp
+    private fun ncc(p: Plane, t: Tpl, x: Int, y: Int): Double {
+        val d = p.d
+        val pw = p.w
+        val tw = t.w
+        val th = t.h
+        val tg = t.d
+        var cross = 0L
+        var idx = 0
+        for (j in 0 until th) {
+            val base = (y + j) * pw + x
+            var row = 0
+            for (i in 0 until tw) {
+                row += d[base + i] * tg[idx + i]
             }
+            cross += row.toLong()
+            idx += tw
         }
-        val match = if (bestScore > 0.0) TemplateMatch(
-            Pt((bestX + t.w * bestScaleX / 2.0).toInt() * 2,
-                (bestY + t.h * bestScaleY / 2.0).toInt() * 2), bestScaleX, bestScaleY, bestScore
-        ) else null
-        matchCache[name] = match
-        return match
+        val s = p.sum(x, y, tw, th).toDouble()
+        val s2 = p.sum2(x, y, tw, th).toDouble()
+        val num = cross.toDouble() - s * t.mean
+        val varF = s2 - s * s / t.n
+        if (varF <= 1e-6) return 0.0
+        val den = sqrt(varF * t.norm)
+        if (den <= 1e-6) return 0.0
+        return num / den
     }
 
-    /** Điều chỉnh điểm theo điểm neo tìm được trên giao diện hiện tại. */
-    fun adjustPoint(f: Frame, anchorName: String, point: Pt): Pt {
-        val t = tpl[anchorName] ?: return point
-        val m = locate(f, anchorName) ?: return point
-        if (m.score < Cfg.MATCH_THRESHOLD) return point
-        val anchor = Pt((t.rect[0] + t.rect[2]) / 2, (t.rect[1] + t.rect[3]) / 2)
-        return Pt(m.center.x + ((point.x - anchor.x) * m.scaleX).toInt(),
-            m.center.y + ((point.y - anchor.y) * m.scaleY).toInt())
-    }
-
-    /** Độ giống (-1..1) của ảnh mẫu `name` trên khung hình. */
-    fun score(f: Frame, name: String): Double {
-        val t = tpl[name] ?: return 0.0
-        val m = Cfg.MARGIN_OVERRIDE[name] ?: Cfg.MATCH_MARGIN
-        val x0 = t.rect[0]
-        val y0 = t.rect[1]
-        val x1 = t.rect[2]
-        val y1 = t.rect[3]
-        val rx0 = maxOf(0, (x0 - m) / 2)
-        val rx1 = minOf(Frame.HW, (x1 + m) / 2)
-        val ry0 = maxOf(0, (y0 - m) / 2)
-        val ry1 = minOf(Frame.HH, (y1 + m) / 2)
-        val xa = rx0
-        val xb = rx1 - t.w
-        val ya = ry0
-        val yb = ry1 - t.h
-        if (xb < xa || yb < ya) return locate(f, name)?.score ?: 0.0
+    /** Tìm quanh (ex, ey) với biên mx, my: quét thô theo `step` rồi tinh chỉnh quanh điểm tốt nhất. */
+    private fun localSearch(p: Plane, t: Tpl, ex: Int, ey: Int, mx: Int, my: Int, step: Int): Hit {
+        val xa = maxOf(0, ex - mx)
+        val xb = minOf(p.w - t.w, ex + mx)
+        val ya = maxOf(0, ey - my)
+        val yb = minOf(p.h - t.h, ey + my)
+        if (xb < xa || yb < ya) return Hit(-2.0, 0, 0)
         var best = -2.0
         var bx = xa
         var by = ya
@@ -188,67 +139,121 @@ class Vision(assets: AssetManager) {
         while (y <= yb) {
             var x = xa
             while (x <= xb) {
-                val c = ncc(f, t, x, y)
+                val c = ncc(p, t, x, y)
                 if (c > best) {
                     best = c
                     bx = x
                     by = y
                 }
-                x += 2
+                x += step
             }
-            y += 2
+            y += step
         }
-        for (dy in -1..1) {
-            for (dx in -1..1) {
-                val x = bx + dx
-                val yy = by + dy
-                if (x >= xa && x <= xb && yy >= ya && yy <= yb) {
-                    val c = ncc(f, t, x, yy)
-                    if (c > best) best = c
+        if (step > 1) {
+            for (dy in -(step - 1)..(step - 1)) {
+                for (dx in -(step - 1)..(step - 1)) {
+                    val x = bx + dx
+                    val yy = by + dy
+                    if (x >= xa && x <= xb && yy >= ya && yy <= yb) {
+                        val c = ncc(p, t, x, yy)
+                        if (c > best) best = c
+                    }
                 }
             }
         }
-        if (best < Cfg.MATCH_THRESHOLD) {
-            val global = locate(f, name)?.score ?: -1.0
-            if (global > best) best = global
-        }
-        return best
+        return Hit(best, bx, by)
     }
 
-    private fun ncc(f: Frame, t: Template, x: Int, y: Int): Double {
-        val half = f.half
-        val tw = t.w
-        val th = t.h
-        val tg = t.gray
-        var cross = 0L
-        var idx = 0
-        for (j in 0 until th) {
-            val p = (y + j) * Frame.HW + x
-            var row = 0
-            for (i in 0 until tw) {
-                row += half[p + i] * tg[idx + i]
-            }
-            cross += row.toLong()
-            idx += tw
+    private fun remember(name: String, dx: Int, dy: Int) {
+        val old = layout.mem[name]
+        val moved = if (old == null) (abs(dx) > 3 || abs(dy) > 3) else (abs(old[0] - dx) > 3 || abs(old[1] - dy) > 3)
+        if (moved) BotLog.i("Dò được vị trí '" + name + "': lệch (" + dx + "," + dy + ")")
+        layout.mem[name] = intArrayOf(dx, dy)
+    }
+
+    /**
+     * Tìm ảnh mẫu `name`. band=false: chỉ tìm quanh vị trí đã nhớ. band=true: nếu không thấy thì dò
+     * theo dải ngang trên toàn bề ngang (thô ở 1/4 rồi tinh chỉnh ở 1/2) và nhớ lại vị trí.
+     */
+    fun locate(f: Frame, name: String, band: Boolean): Loc {
+        val t = tpl[name] ?: return Loc(0.0, 0, 0)
+        val x0 = t.rect[0]
+        val y0 = t.rect[1]
+        val mem = layout.mem[name]
+        val dx0 = if (mem != null) mem[0] else 0
+        val dy0 = if (mem != null) mem[1] else 0
+        val ex = (x0 + dx0) / 2
+        val ey = (y0 + dy0) / 2
+        val mgn = Cfg.MARGIN_OVERRIDE[name]
+        val m = (if (mgn != null) mgn else Cfg.MATCH_MARGIN) / 2
+        val h1 = localSearch(f.half, t.half, ex, ey, m, m, 2)
+        if (h1.score >= Cfg.MATCH_THRESHOLD) {
+            val loc = Loc(h1.score, h1.x * 2 - x0, h1.y * 2 - y0)
+            remember(name, loc.dx, loc.dy)
+            return loc
         }
-        val n = (tw * th).toDouble()
-        val s = f.windowSum(x, y, tw, th).toDouble()
-        val s2 = f.windowSum2(x, y, tw, th).toDouble()
-        val num = cross.toDouble() - s * t.mean
-        val varF = s2 - s * s / n
-        if (varF <= 1e-6) return 0.0
-        val den = sqrt(varF * t.norm)
-        if (den <= 1e-6) return 0.0
-        return num / den
+        if (!band) return Loc(h1.score, h1.x * 2 - x0, h1.y * 2 - y0)
+
+        val qt = t.quarter
+        val qp = f.quarter
+        val qm = (if (mgn != null) mgn else Cfg.BAND_MARGIN_Y) / 4
+        val qey = ey / 2
+        val ya = maxOf(0, qey - qm)
+        val yb = minOf(qp.h - qt.h, qey + qm)
+        val xb = qp.w - qt.w
+        if (yb < ya || xb < 0) return Loc(h1.score, h1.x * 2 - x0, h1.y * 2 - y0)
+        var best = -2.0
+        var bx = 0
+        var by = ya
+        for (y in ya..yb) {
+            for (x in 0..xb) {
+                val c = ncc(qp, qt, x, y)
+                if (c > best) {
+                    best = c
+                    bx = x
+                    by = y
+                }
+            }
+        }
+        val h2 = localSearch(f.half, t.half, bx * 2, by * 2, 3, 3, 1)
+        val loc = Loc(h2.score, h2.x * 2 - x0, h2.y * 2 - y0)
+        if (h2.score >= Cfg.MATCH_THRESHOLD) remember(name, loc.dx, loc.dy)
+        return loc
+    }
+
+    /** Điểm giống của ảnh mẫu khi tìm quanh vị trí chuẩn dịch đi s (không đụng tới bộ nhớ). */
+    fun scoreAt(f: Frame, name: String, s: IntArray): Double {
+        val t = tpl[name] ?: return 0.0
+        val mgn = Cfg.MARGIN_OVERRIDE[name]
+        val m = (if (mgn != null) mgn else Cfg.MATCH_MARGIN) / 2
+        return localSearch(f.half, t.half, (t.rect[0] + s[0]) / 2, (t.rect[1] + s[1]) / 2, m, m, 2).score
+    }
+
+    /** Độ dịch (dx, dy) đã nhớ của ảnh mẫu; chưa có thì (0, 0). */
+    fun anchor(name: String): IntArray {
+        val m = layout.mem[name]
+        return m ?: intArrayOf(0, 0)
+    }
+
+    /** Độ dịch của ảnh mẫu: dùng giá trị đã nhớ, chưa có thì dò theo dải ngang, không thấy thì dùng `fallback`. */
+    fun shiftFor(f: Frame, name: String, fallback: IntArray?): IntArray {
+        val m = layout.mem[name]
+        if (m != null) return m
+        val loc = locate(f, name, true)
+        if (loc.score >= Cfg.ANCHOR_THRESHOLD) {
+            remember(name, loc.dx, loc.dy)
+            return intArrayOf(loc.dx, loc.dy)
+        }
+        return fallback ?: intArrayOf(0, 0)
     }
 
     /** Xác định đang ở màn hình nào (thứ tự ưu tiên giống bản máy tính). */
-    fun identify(f: Frame): String {
+    fun identify(f: Frame, band: Boolean): String {
         val memo = HashMap<String, Boolean>()
         fun ok(n: String): Boolean {
             val c = memo[n]
             if (c != null) return c
-            val r = score(f, n) >= Cfg.MATCH_THRESHOLD
+            val r = locate(f, n, band).score >= Cfg.MATCH_THRESHOLD
             memo[n] = r
             return r
         }
@@ -264,35 +269,78 @@ class Vision(assets: AssetManager) {
         return Cfg.ST_UNKNOWN
     }
 
-    fun adjustPointByAnchor(f: Frame, anchorName: String, point: Pt): Pt = adjustPoint(f, anchorName, point)
+    // ------------------------------------------------------------------ 5 ô nhân vật
+    /** Dò viên ngọc dưới mỗi ô nhân vật; trả về tâm các ô (toạ độ chuẩn). Rỗng nếu không thấy. */
+    fun findCards(f: Frame): List<Pt> {
+        val t = tpl["card_gem"] ?: return ArrayList<Pt>()
+        val g = t.half
+        val hp = f.half
+        val y0 = t.rect[1]
+        val ya = maxOf(0, (y0 - 30) / 2)
+        val yb = minOf(hp.h - g.h, (y0 + 30) / 2)
+        val xb = hp.w - g.w
+        val out = ArrayList<Pt>()
+        if (yb < ya || xb < 0) return out
+        val rows = yb - ya + 1
+        val cols = xb + 1
+        val sc = DoubleArray(rows * cols)
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                sc[r * cols + c] = ncc(hp, g, c, ya + r)
+            }
+        }
+        // chọn các đỉnh cao nhất, mỗi đỉnh loại bỏ vùng ±50 xung quanh
+        val pk = ArrayList<IntArray>()
+        for (k in 0 until 12) {
+            var bi = -1
+            var bs = Cfg.GEM_THRESHOLD
+            for (i in sc.indices) {
+                if (sc[i] >= bs) {
+                    bs = sc[i]
+                    bi = i
+                }
+            }
+            if (bi < 0) break
+            val bc = bi % cols
+            val br = bi / cols
+            pk.add(intArrayOf(bc * 2, (ya + br) * 2))
+            for (r in 0 until rows) {
+                for (c in maxOf(0, bc - 50)..minOf(cols - 1, bc + 50)) {
+                    sc[r * cols + c] = -1.0
+                }
+            }
+        }
+        pk.sortBy { it[0] }
+        // lấy chuỗi dài nhất các viên ngọc cách đều ~279px (loại biểu tượng ngọc ở nút nâng cấp pha lê)
+        var best = ArrayList<IntArray>()
+        for (i in pk.indices) {
+            val chain = ArrayList<IntArray>()
+            chain.add(pk[i])
+            for (j in (i + 1) until pk.size) {
+                val gap = pk[j][0] - chain[chain.size - 1][0]
+                if (abs(gap - Cfg.GEM_SPACING) <= Cfg.GEM_SPACING_TOL) chain.add(pk[j])
+            }
+            if (chain.size > best.size) best = chain
+        }
+        if (best.size < 2) return out
+        for (p in best) {
+            out.add(Pt(p[0] + Cfg.CARD_DX, p[1] + Cfg.CARD_DY))
+        }
+        return out
+    }
 
-    fun cellCenter(f: Frame, index: Int): Pt = adjustPoint(f, "grid_label", Cfg.cellCenter(index))
-
+    // ------------------------------------------------------------------ đo màu (đều nhận độ dịch s)
     /** Tỉ lệ lấp đầy của thanh tiến trình (0..1), tìm điểm vàng xa nhất. */
-    fun barRatio(f: Frame, bar: IntArray, anchorName: String? = null): Double {
-        val q = if (anchorName != null) {
-            val a = tpl[anchorName]
-            val m = locate(f, anchorName)?.takeIf { it.score >= Cfg.MATCH_THRESHOLD }
-            if (a != null && m != null) {
-                val cx = (a.rect[0] + a.rect[2]) / 2
-                val cy = (a.rect[1] + a.rect[3]) / 2
-                intArrayOf(
-                    m.center.x + ((bar[0] - cx) * m.scaleX).toInt(),
-                    m.center.y + ((bar[1] - cy) * m.scaleY).toInt(),
-                    m.center.x + ((bar[2] - cx) * m.scaleX).toInt(),
-                    m.center.y + ((bar[3] - cy) * m.scaleY).toInt()
-                )
-            } else bar
-        } else bar
-        val x0 = q[0].coerceIn(0, Cfg.REF_W - 1)
-        val y0 = q[1].coerceIn(0, Cfg.REF_H - 1)
-        val x1 = q[2].coerceIn(x0, Cfg.REF_W - 1)
-        val y1 = q[3].coerceIn(y0, Cfg.REF_H - 1)
+    fun barRatio(f: Frame, bar: IntArray, s: IntArray): Double {
+        val x0 = bar[0]
+        val y0 = bar[1]
+        val x1 = bar[2]
+        val y1 = bar[3]
         var best = -1
         val ys = intArrayOf(y0 + 4, y1 - 4)
         for (y in ys) {
             for (x in x0..x1) {
-                val c = f.rgb(x, y)
+                val c = f.rgb(x + s[0], y + s[1])
                 val r = (c shr 16) and 255
                 val g = (c shr 8) and 255
                 val b = c and 255
@@ -305,27 +353,10 @@ class Vision(assets: AssetManager) {
     }
 
     /** Phân loại 30 ô nhà: EMPTY / DARK (đang đánh, đã clear) / LIGHT (đánh được). Chỉ số 1..30. */
-    fun scanCells(f: Frame): IntArray {
+    fun scanCells(f: Frame, s: IntArray): IntArray {
         val out = IntArray(31)
-        val anchor = tpl["grid_label"]
-        val match = locate(f, "grid_label")?.takeIf { it.score >= Cfg.MATCH_THRESHOLD }
-        val baseAnchor = if (anchor != null) Pt((anchor.rect[0] + anchor.rect[2]) / 2, (anchor.rect[1] + anchor.rect[3]) / 2) else Pt(0, 0)
-        val scaleX = match?.scaleX ?: 1.0
-        val scaleY = match?.scaleY ?: 1.0
-        val dx = (match?.center?.x ?: baseAnchor.x) - baseAnchor.x
-        val dy = (match?.center?.y ?: baseAnchor.y) - baseAnchor.y
         for (i in 1..30) {
-            val raw = Cfg.cellRect(i)
-            val q = intArrayOf(
-                (match?.center?.x?.plus(((raw[0] - baseAnchor.x) * scaleX).toInt()) ?: raw[0] + dx),
-                (match?.center?.y?.plus(((raw[1] - baseAnchor.y) * scaleY).toInt()) ?: raw[1] + dy),
-                (match?.center?.x?.plus(((raw[2] - baseAnchor.x) * scaleX).toInt()) ?: raw[2] + dx),
-                (match?.center?.y?.plus(((raw[3] - baseAnchor.y) * scaleY).toInt()) ?: raw[3] + dy)
-            )
-            q[0] = q[0].coerceIn(0, Cfg.REF_W - 1)
-            q[1] = q[1].coerceIn(0, Cfg.REF_H - 1)
-            q[2] = q[2].coerceIn(q[0] + 1, Cfg.REF_W)
-            q[3] = q[3].coerceIn(q[1] + 1, Cfg.REF_H)
+            val q = Cfg.cellRect(i)
             var dark = 0
             var white = 0
             var n = 0
@@ -333,7 +364,7 @@ class Vision(assets: AssetManager) {
             while (y < q[3] - 6) {
                 var x = q[0] + 6
                 while (x < q[2] - 6) {
-                    val c = f.rgb(x, y)
+                    val c = f.rgb(x + s[0], y + s[1])
                     val r = (c shr 16) and 255
                     val g = (c shr 8) and 255
                     val b = c and 255
@@ -358,27 +389,17 @@ class Vision(assets: AssetManager) {
     }
 
     /** Deck 1,2,3 còn dùng được không (hàng sáng = còn dùng, hàng tối = đã hiện Thắng/Thua). */
-    fun deckAvailable(f: Frame): BooleanArray {
+    fun deckAvailable(f: Frame, s: IntArray): BooleanArray {
         val out = BooleanArray(3)
-        val base = tpl["dialog_close"]
-        val m = locate(f, "dialog_close")?.takeIf { it.score >= Cfg.MATCH_THRESHOLD }
-        val ax = if (base != null) (base.rect[0] + base.rect[2]) / 2 else 0
-        val ay = if (base != null) (base.rect[1] + base.rect[3]) / 2 else 0
-        val scaleX = m?.scaleX ?: 1.0
-        val scaleY = m?.scaleY ?: 1.0
-        val dx = (m?.center?.x ?: ax) - ax
-        val dy = (m?.center?.y ?: ay) - ay
         for (i in 0 until 3) {
-            val y = (m?.center?.y?.plus(((Cfg.DECK_ROW_Y[i] - ay) * scaleY).toInt()) ?: (Cfg.DECK_ROW_Y[i] + dy))
+            val y = Cfg.DECK_ROW_Y[i]
             var sum = 0L
             var n = 0
-            val halfHeight = (18 * scaleY).toInt().coerceAtLeast(6)
-            var yy = y - halfHeight
-            while (yy < y + halfHeight) {
-                var xx = (m?.center?.x?.plus(((Cfg.DECK_SAMPLE_X0 - ax) * scaleX).toInt()) ?: (Cfg.DECK_SAMPLE_X0 + dx))
-                val sampleX1 = (m?.center?.x?.plus(((Cfg.DECK_SAMPLE_X1 - ax) * scaleX).toInt()) ?: (Cfg.DECK_SAMPLE_X1 + dx))
-                while (xx < sampleX1) {
-                    sum += Frame.gray(f.rgb(xx, yy))
+            var yy = y - 18
+            while (yy < y + 18) {
+                var xx = Cfg.DECK_SAMPLE_X0
+                while (xx < Cfg.DECK_SAMPLE_X1) {
+                    sum += Frame.gray(f.rgb(xx + s[0], yy + s[1]))
                     n++
                     xx += 3
                 }
@@ -390,25 +411,14 @@ class Vision(assets: AssetManager) {
     }
 
     /** Deck đang được chọn (có dấu tích đỏ): 0, 1, 2 hoặc -1 nếu chưa chọn deck nào. */
-    fun selectedDeck(f: Frame, avail: BooleanArray?): Int {
-        val base = tpl["dialog_close"]
-        val m = locate(f, "dialog_close")?.takeIf { it.score >= Cfg.MATCH_THRESHOLD }
-        val ax = if (base != null) (base.rect[0] + base.rect[2]) / 2 else 0
-        val ay = if (base != null) (base.rect[1] + base.rect[3]) / 2 else 0
-        val scaleX = m?.scaleX ?: 1.0
-        val scaleY = m?.scaleY ?: 1.0
-        val dx = (m?.center?.x ?: ax) - ax
-        val dy = (m?.center?.y ?: ay) - ay
+    fun selectedDeck(f: Frame, avail: BooleanArray?, s: IntArray): Int {
         for (i in 0 until 3) {
             if (avail != null && !avail[i]) continue
-            val y = (m?.center?.y?.plus(((Cfg.DECK_ROW_Y[i] - ay) * scaleY).toInt()) ?: (Cfg.DECK_ROW_Y[i] + dy))
+            val y = Cfg.DECK_ROW_Y[i]
             var red = 0
-            val checkX0 = (m?.center?.x?.plus(((Cfg.DECK_CHECK_X0 - ax) * scaleX).toInt()) ?: (Cfg.DECK_CHECK_X0 + dx))
-            val checkX1 = (m?.center?.x?.plus(((Cfg.DECK_CHECK_X1 - ax) * scaleX).toInt()) ?: (Cfg.DECK_CHECK_X1 + dx))
-            val halfHeight = (26 * scaleY).toInt().coerceAtLeast(8)
-            for (yy in (y - halfHeight) until (y + halfHeight)) {
-                for (xx in checkX0 until checkX1) {
-                    val c = f.rgb(xx, yy)
+            for (yy in (y - 26) until (y + 26)) {
+                for (xx in Cfg.DECK_CHECK_X0 until Cfg.DECK_CHECK_X1) {
+                    val c = f.rgb(xx + s[0], yy + s[1])
                     val r = (c shr 16) and 255
                     val g = (c shr 8) and 255
                     val b = c and 255

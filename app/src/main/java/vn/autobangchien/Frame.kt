@@ -3,10 +3,65 @@ package vn.autobangchien
 import android.graphics.Bitmap
 import kotlin.math.roundToInt
 
-/** Một khung hình chụp từ màn hình. Toạ độ logic luôn theo canvas chuẩn 2400x1080. */
-class Frame(val w: Int, val h: Int, val px: IntArray) {
+/** Làm mờ hộp 3x3 (biên lặp lại). Giúp so khớp bớt nhạy với lệch dưới pixel khi thu phóng/dịch lẻ. */
+fun blur3(d: IntArray, w: Int, h: Int): IntArray {
+    val tmp = IntArray(w * h)
+    for (y in 0 until h) {
+        val r = y * w
+        for (x in 0 until w) {
+            val a = d[r + (if (x > 0) x - 1 else 0)]
+            val b = d[r + x]
+            val c = d[r + (if (x < w - 1) x + 1 else w - 1)]
+            tmp[r + x] = a + b + c
+        }
+    }
+    val out = IntArray(w * h)
+    for (y in 0 until h) {
+        val y0 = (if (y > 0) y - 1 else 0) * w
+        val y1 = y * w
+        val y2 = (if (y < h - 1) y + 1 else h - 1) * w
+        for (x in 0 until w) {
+            out[y1 + x] = (tmp[y0 + x] + tmp[y1 + x] + tmp[y2 + x]) / 9
+        }
+    }
+    return out
+}
+
+/** Một mặt phẳng ảnh xám kèm ảnh tích phân để tính nhanh thống kê cửa sổ khi so khớp. */
+class Plane(val w: Int, val h: Int, val d: IntArray) {
+    private val integ: LongArray by lazy { build(false) }
+    private val integ2: LongArray by lazy { build(true) }
+
+    private fun build(square: Boolean): LongArray {
+        val w1 = w + 1
+        val out = LongArray(w1 * (h + 1))
+        for (y in 1..h) {
+            var row = 0L
+            for (x in 1..w) {
+                val v = d[(y - 1) * w + (x - 1)].toLong()
+                row += if (square) v * v else v
+                out[y * w1 + x] = out[(y - 1) * w1 + x] + row
+            }
+        }
+        return out
+    }
+
+    fun sum(x: Int, y: Int, tw: Int, th: Int): Long = win(integ, x, y, tw, th)
+
+    fun sum2(x: Int, y: Int, tw: Int, th: Int): Long = win(integ2, x, y, tw, th)
+
+    private fun win(a: LongArray, x: Int, y: Int, tw: Int, th: Int): Long {
+        val w1 = w + 1
+        return a[(y + th) * w1 + (x + tw)] - a[y * w1 + (x + tw)] - a[(y + th) * w1 + x] + a[y * w1 + x]
+    }
+}
+
+/**
+ * Một khung hình chụp từ màn hình thật (w x h). `scale` là tỉ lệ so với màn hình chuẩn cao 1080
+ * (mặc định h/1080). Mọi toạ độ ở đây là "toạ độ chuẩn": cao 1080, rộng refW (tuỳ tỉ lệ màn hình).
+ */
+class Frame(val w: Int, val h: Int, val px: IntArray, val scale: Double) {
     companion object {
-        const val HW = 1200
         const val HH = 540
         const val TW = 160
         const val TH = 72
@@ -15,126 +70,82 @@ class Frame(val w: Int, val h: Int, val px: IntArray) {
             ((((c shr 16) and 255) * 299) + (((c shr 8) and 255) * 587) + ((c and 255) * 114)) / 1000
     }
 
-    /** Tự bỏ viền đen thật sự (letterbox/pillarbox), không cắt nền game tối thông thường. */
-    private val content: IntArray by lazy { detectContentBounds() }
-    val contentLeft: Int get() = content[0]
-    val contentTop: Int get() = content[1]
-    val contentRight: Int get() = content[2]
-    val contentBottom: Int get() = content[3]
+    val refW: Int = (w / scale).roundToInt()
+    val hw: Int = refW / 2
 
-    private fun detectContentBounds(): IntArray {
-        var l = 0
-        var t = 0
-        var r = w - 1
-        var b = h - 1
-        fun blackRow(y: Int): Boolean {
-            var dark = 0
-            val samples = 64
-            for (i in 0 until samples) {
-                val x = (i * (w - 1) / (samples - 1)).coerceIn(0, w - 1)
-                val c = px[y * w + x]
-                if (((c shr 16) and 255) <= 8 && ((c shr 8) and 255) <= 8 && (c and 255) <= 8) dark++
-            }
-            return dark >= samples * 0.985
+    private fun clampX(v: Int): Int = if (v < 0) 0 else if (v >= w) w - 1 else v
+
+    private fun clampY(v: Int): Int = if (v < 0) 0 else if (v >= h) h - 1 else v
+
+    /** Điểm ảnh ARGB tại toạ độ chuẩn (rx, ry). */
+    fun rgb(rx: Int, ry: Int): Int = px[clampY((ry * scale).toInt()) * w + clampX((rx * scale).toInt())]
+
+    fun rescaled(newScale: Double): Frame = Frame(w, h, px, newScale)
+
+    /** Ảnh xám thu nhỏ một nửa (rộng hw, cao 540), trung bình khối 2x2. */
+    val half: Plane by lazy { buildHalf() }
+
+    private fun buildHalf(): Plane {
+        val ow = hw
+        val out = IntArray(ow * HH)
+        val xs0 = IntArray(ow)
+        val xs1 = IntArray(ow)
+        for (x in 0 until ow) {
+            xs0[x] = clampX(((2 * x) * scale).toInt())
+            xs1[x] = clampX(((2 * x + 1) * scale).toInt())
         }
-        fun blackCol(x: Int): Boolean {
-            var dark = 0
-            val samples = 48
-            for (i in 0 until samples) {
-                val y = (i * (h - 1) / (samples - 1)).coerceIn(0, h - 1)
-                val c = px[y * w + x]
-                if (((c shr 16) and 255) <= 8 && ((c shr 8) and 255) <= 8 && (c and 255) <= 8) dark++
-            }
-            return dark >= samples * 0.985
-        }
-        // Chỉ tìm viền trong 25% cạnh để tránh nhầm một vùng tối nằm sâu trong game.
-        val maxY = (h / 4).coerceAtLeast(1)
-        val maxX = (w / 4).coerceAtLeast(1)
-        while (t < maxY && blackRow(t)) t++
-        while (b > h - 1 - maxY && blackRow(b)) b--
-        while (l < maxX && blackCol(l)) l++
-        while (r > w - 1 - maxX && blackCol(r)) r--
-        if (r - l < w / 2 || b - t < h / 2) return intArrayOf(0, 0, w - 1, h - 1)
-        val detectedRatio = (r - l + 1).toDouble() / (b - t + 1).toDouble()
-        // Vùng game mục tiêu thường xấp xỉ 18:9 đến 22:9; bỏ kết quả crop bất thường.
-        if (detectedRatio !in 1.95..2.45) return intArrayOf(0, 0, w - 1, h - 1)
-        return intArrayOf(l, t, r, b)
-    }
-
-    /** Quy đổi điểm canvas chuẩn sang pixel ảnh chụp; dùng cùng phép biến đổi khi gửi thao tác chạm. */
-    fun toScreen(p: Pt): Pt = Pt(mapX(p.x), mapY(p.y))
-
-    private fun mapX(rx: Int): Int =
-        (contentLeft + rx.coerceIn(0, Cfg.REF_W - 1).toDouble() * (contentRight - contentLeft) / (Cfg.REF_W - 1)).roundToInt().coerceIn(0, w - 1)
-
-    private fun mapY(ry: Int): Int =
-        (contentTop + ry.coerceIn(0, Cfg.REF_H - 1).toDouble() * (contentBottom - contentTop) / (Cfg.REF_H - 1)).roundToInt().coerceIn(0, h - 1)
-
-    /** Điểm ảnh ARGB tại toạ độ logic chuẩn. */
-    fun rgb(rx: Int, ry: Int): Int = px[mapY(ry) * w + mapX(rx)]
-
-    /** Ảnh xám 1200x540 được chuẩn hoá theo vùng game đã phát hiện. */
-    val half: IntArray by lazy { buildHalf() }
-
-    private fun buildHalf(): IntArray {
-        val out = IntArray(HW * HH)
         for (y in 0 until HH) {
-            val sy0 = mapY(2 * y)
-            val sy1 = mapY(2 * y + 1)
-            for (x in 0 until HW) {
-                val sx0 = mapX(2 * x)
-                val sx1 = mapX(2 * x + 1)
-                val s = gray(px[sy0 * w + sx0]) + gray(px[sy0 * w + sx1]) +
-                    gray(px[sy1 * w + sx0]) + gray(px[sy1 * w + sx1])
-                out[y * HW + x] = s / 4
+            val r0 = clampY(((2 * y) * scale).toInt()) * w
+            val r1 = clampY(((2 * y + 1) * scale).toInt()) * w
+            for (x in 0 until ow) {
+                val s = gray(px[r0 + xs0[x]]) + gray(px[r0 + xs1[x]]) +
+                    gray(px[r1 + xs0[x]]) + gray(px[r1 + xs1[x]])
+                out[y * ow + x] = s / 4
             }
         }
-        return out
+        return Plane(ow, HH, blur3(out, ow, HH))
     }
 
-    private val integ: LongArray by lazy { buildIntegral(false) }
-    private val integ2: LongArray by lazy { buildIntegral(true) }
+    /** Thu nhỏ thêm một nửa nữa (1/4), dùng để dò thô trên toàn bề ngang. */
+    val quarter: Plane by lazy { buildQuarter() }
 
-    private fun buildIntegral(square: Boolean): LongArray {
-        val w1 = HW + 1
-        val out = LongArray(w1 * (HH + 1))
-        val g = half
-        for (y in 1..HH) {
-            var row = 0L
-            for (x in 1..HW) {
-                val v = g[(y - 1) * HW + (x - 1)].toLong()
-                row += if (square) v * v else v
-                out[y * w1 + x] = out[(y - 1) * w1 + x] + row
+    private fun buildQuarter(): Plane {
+        val hp = half
+        val qw = hp.w / 2
+        val qh = hp.h / 2
+        val out = IntArray(qw * qh)
+        for (y in 0 until qh) {
+            for (x in 0 until qw) {
+                val i = (2 * y) * hp.w + 2 * x
+                out[y * qw + x] = (hp.d[i] + hp.d[i + 1] + hp.d[i + hp.w] + hp.d[i + hp.w + 1]) / 4
             }
         }
-        return out
+        return Plane(qw, qh, out)
     }
 
-    fun windowSum(x: Int, y: Int, tw: Int, th: Int): Long = win(integ, x, y, tw, th)
-    fun windowSum2(x: Int, y: Int, tw: Int, th: Int): Long = win(integ2, x, y, tw, th)
-
-    private fun win(a: LongArray, x: Int, y: Int, tw: Int, th: Int): Long {
-        val w1 = HW + 1
-        return a[(y + th) * w1 + (x + tw)] - a[y * w1 + (x + tw)] - a[(y + th) * w1 + x] + a[y * w1 + x]
-    }
-
+    /** Ảnh xám 160x72 để phát hiện màn hình đã đổi. */
     val thumb: IntArray by lazy { buildThumb() }
 
     private fun buildThumb(): IntArray {
-        val g = half
+        val hp = half
+        val g = hp.d
         val out = IntArray(TW * TH)
         for (ty in 0 until TH) {
             val ys = ty * HH / TH
+            val y1 = minOf(HH - 1, ys + 1)
+            val y5 = minOf(HH - 1, ys + 5)
             for (tx in 0 until TW) {
-                val xs = tx * HW / TW
-                val s = g[(ys + 1) * HW + xs + 1] + g[(ys + 1) * HW + xs + 5] +
-                    g[(ys + 5) * HW + xs + 1] + g[(ys + 5) * HW + xs + 5]
+                val xs = tx * hp.w / TW
+                val x1 = minOf(hp.w - 1, xs + 1)
+                val x5 = minOf(hp.w - 1, xs + 5)
+                val s = g[y1 * hp.w + x1] + g[y1 * hp.w + x5] + g[y5 * hp.w + x1] + g[y5 * hp.w + x5]
                 out[ty * TW + tx] = s / 4
             }
         }
         return out
     }
 
+    /** Độ khác biệt trung bình (0..255) giữa hai khung hình. */
     fun diff(o: Frame): Double {
         val a = thumb
         val b = o.thumb
